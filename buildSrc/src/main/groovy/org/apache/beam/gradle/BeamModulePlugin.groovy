@@ -406,7 +406,7 @@ class BeamModulePlugin implements Plugin<Project> {
     def hamcrest_version = "2.1"
     def jackson_version = "2.10.2"
     def jaxb_api_version = "2.3.3"
-    def kafka_version = "1.0.0"
+    def kafka_version = "2.6.0"
     def nemo_version = "0.1"
     def netty_version = "4.1.51.Final"
     def postgres_version = "42.2.2"
@@ -540,6 +540,8 @@ class BeamModulePlugin implements Plugin<Project> {
         junit                                       : "junit:junit:4.13-beta-3",
         kafka                                       : "org.apache.kafka:kafka_2.11:$kafka_version",
         kafka_clients                               : "org.apache.kafka:kafka-clients:$kafka_version",
+        kafka_streams                               : "org.apache.kafka:kafka-streams:$kafka_version",
+        kafka_streams_test_utils                    : "org.apache.kafka:kafka-streams-test-utils:$kafka_version",
         mockito_core                                : "org.mockito:mockito-core:3.0.0",
         nemo_compiler_frontend_beam                 : "org.apache.nemo:nemo-compiler-frontend-beam:$nemo_version",
         netty_handler                               : "io.netty:netty-handler:$netty_version",

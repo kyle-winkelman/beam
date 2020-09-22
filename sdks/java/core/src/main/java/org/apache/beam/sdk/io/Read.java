@@ -929,7 +929,12 @@ public class Read {
    * since pipeline shape affects pipeline update for some runners.
    */
   private static final Set<String> SPLITTABLE_DOFN_PREFERRED_RUNNERS =
-      ImmutableSet.of("DirectRunner", "Twister2Runner", "Twister2TestRunner");
+      ImmutableSet.of(
+          "DirectRunner",
+          "KafkaStreamsRunner",
+          "TestKafkaStreamsRunner",
+          "Twister2Runner",
+          "Twister2TestRunner");
 
   private static boolean useSdf(PipelineOptions options) {
     // TODO(BEAM-10670): Make this by default true and have runners opt-out instead.

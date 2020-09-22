@@ -19,6 +19,7 @@ package org.apache.beam.runners.core;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.runners.core.construction.PTransformReplacements;
 import org.apache.beam.runners.core.construction.PTransformTranslation.RawPTransform;
@@ -265,6 +266,7 @@ public class SplittableParDoViaKeyedWorkItems {
     private transient @Nullable SplittableProcessElementInvoker<
             InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
         processElementInvoker;
+    private transient @Nullable Consumer<KV<byte[], Instant>> watermarkConsumer;
 
     private transient @Nullable DoFnInvoker<InputT, OutputT> invoker;
 
@@ -301,6 +303,10 @@ public class SplittableParDoViaKeyedWorkItems {
                 InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
             invoker) {
       this.processElementInvoker = invoker;
+    }
+
+    public void setWatermarkConsumer(Consumer<KV<byte[], Instant>> watermarkConsumer) {
+      this.watermarkConsumer = watermarkConsumer;
     }
 
     public DoFn<InputT, OutputT> getFn() {
@@ -531,6 +537,9 @@ public class SplittableParDoViaKeyedWorkItems {
         restrictionState.clear();
         watermarkEstimatorState.clear();
         holdState.clear();
+        if (watermarkConsumer != null) {
+          watermarkConsumer.accept(KV.of(key, GlobalWindow.TIMESTAMP_MAX_VALUE));
+        }
         return;
       }
 
@@ -543,6 +552,9 @@ public class SplittableParDoViaKeyedWorkItems {
       Instant wakeupTime =
           timerInternals.currentProcessingTime().plus(result.getContinuation().resumeDelay());
       holdState.add(futureOutputWatermark);
+      if (watermarkConsumer != null) {
+        watermarkConsumer.accept(KV.of(key, futureOutputWatermark));
+      }
       // Set a timer to continue processing this element.
       timerInternals.setTimer(
           TimerInternals.TimerData.of(
