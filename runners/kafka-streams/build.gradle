@@ -60,10 +60,18 @@ task validatesRunnerStreaming(type: Test) {
       project(":runners:core-java").sourceSets.test.output.classesDirs,
       project.sourceSets.test.output.classesDirs)
   maxHeapSize = '4G'
-  maxParallelForks = 4
+  maxParallelForks = 1
   useJUnit {
     includeCategories 'org.apache.beam.sdk.testing.ValidatesRunner'
+    excludeCategories 'org.apache.beam.sdk.testing.UsesTestStream'
     excludeCategories 'org.apache.beam.sdk.testing.UsesRequiresTimeSortedInput'
+    excludeCategories 'org.apache.beam.sdk.testing.UsesAttemptedMetrics'
+    excludeCategories 'org.apache.beam.sdk.testing.UsesCommittedMetrics'
+  }
+  testLogging {
+    events 'failed'
+    exceptionFormat 'full'
+    showStandardStreams = 'true'
   }
 }
 

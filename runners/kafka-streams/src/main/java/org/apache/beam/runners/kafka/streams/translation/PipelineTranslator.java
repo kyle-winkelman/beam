@@ -26,7 +26,6 @@ import org.apache.beam.sdk.runners.TransformHierarchy.Node;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
-import org.slf4j.LoggerFactory;
 
 public class PipelineTranslator extends Pipeline.PipelineVisitor.Defaults {
 
@@ -65,14 +64,18 @@ public class PipelineTranslator extends Pipeline.PipelineVisitor.Defaults {
           TransformT extends PTransform<InputT, OutputT>>
       void doVisitTransform(Node node) {
     TransformT transform = (TransformT) node.getTransform();
+    AppliedPTransform<?, ?, ?> enclosingAppliedPTransform =
+        node.getEnclosingNode() == null
+            ? null
+            : node.getEnclosingNode().getTransform() == null
+                ? null
+                : node.getEnclosingNode().toAppliedPTransform(pipeline);
     TransformTranslator<InputT, OutputT, TransformT> transformTranslator =
         (TransformTranslator<InputT, OutputT, TransformT>)
             TransformTranslators.get(PTransformTranslation.urnForTransformOrNull(transform));
-    if (transformTranslator == null) {
-      LoggerFactory.getLogger(getClass()).error("No TransformTranslator for {}", transform);
-    }
     transformTranslator.translate(
         (AppliedPTransform<InputT, OutputT, TransformT>) node.toAppliedPTransform(pipeline),
+        enclosingAppliedPTransform,
         context);
   }
 }

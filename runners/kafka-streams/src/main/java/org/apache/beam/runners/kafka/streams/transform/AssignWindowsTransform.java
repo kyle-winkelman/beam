@@ -18,6 +18,7 @@
 package org.apache.beam.runners.kafka.streams.transform;
 
 import java.util.Collection;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.WindowedValue;
@@ -25,7 +26,8 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterable
 import org.apache.kafka.streams.kstream.ValueMapper;
 import org.joda.time.Instant;
 
-public class AssignWindowsTransform<T> implements ValueMapper<WindowedValue<T>, WindowedValue<T>> {
+public class AssignWindowsTransform<T>
+    implements ValueMapper<WatermarkOrWindowedValue<T>, WatermarkOrWindowedValue<T>> {
 
   private final WindowFn<T, BoundedWindow> windowFn;
 
@@ -34,10 +36,14 @@ public class AssignWindowsTransform<T> implements ValueMapper<WindowedValue<T>, 
   }
 
   @Override
-  public WindowedValue<T> apply(WindowedValue<T> windowedValue) {
-    T element = windowedValue.getValue();
-    Instant timestamp = windowedValue.getTimestamp();
-    BoundedWindow boundedWindow = Iterables.getOnlyElement(windowedValue.getWindows());
+  public WatermarkOrWindowedValue<T> apply(WatermarkOrWindowedValue<T> watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.windowedValue() == null) {
+      return watermarkOrWindowedValue;
+    }
+    T element = watermarkOrWindowedValue.windowedValue().getValue();
+    Instant timestamp = watermarkOrWindowedValue.windowedValue().getTimestamp();
+    BoundedWindow boundedWindow =
+        Iterables.getOnlyElement(watermarkOrWindowedValue.windowedValue().getWindows());
     Collection<BoundedWindow> windows;
     try {
       windows =
@@ -61,6 +67,8 @@ public class AssignWindowsTransform<T> implements ValueMapper<WindowedValue<T>, 
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    return WindowedValue.of(element, timestamp, windows, windowedValue.getPane());
+    return WatermarkOrWindowedValue.of(
+        WindowedValue.of(
+            element, timestamp, windows, watermarkOrWindowedValue.windowedValue().getPane()));
   }
 }

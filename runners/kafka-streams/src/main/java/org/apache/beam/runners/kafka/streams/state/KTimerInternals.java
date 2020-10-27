@@ -17,38 +17,39 @@
  */
 package org.apache.beam.runners.kafka.streams.state;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.runners.core.StateNamespace;
+import org.apache.beam.runners.core.StateNamespaces;
 import org.apache.beam.runners.core.TimerInternals;
+import org.apache.beam.runners.kafka.streams.watermark.Watermark;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.joda.time.Instant;
 
 public class KTimerInternals<K> implements TimerInternals {
 
+  public static final String WATERMARK = "__watermark";
+
   @SuppressWarnings("unchecked")
   public static <K> KTimerInternals<K> of(
       String timerStoreName, ProcessorContext processorContext) {
+    System.out.println("KTimerInternals timerStoreName: " + timerStoreName);
     return new KTimerInternals<>(
-        (KeyValueStore<K, Map<String, TimerData>>) processorContext.getStateStore(timerStoreName),
-        (KeyValueStore<String, ValueAndTimestamp<Map<byte[], Instant>>>)
-            processorContext.getStateStore("watermark"));
+        (KeyValueStore<K, Map<String, TimerData>>) processorContext.getStateStore(timerStoreName));
   }
 
   private final KeyValueStore<K, Map<String, TimerData>> store;
-  private final KeyValueStore<String, ValueAndTimestamp<Map<byte[], Instant>>> watermarks;
 
   private Instant processingTime;
   private Instant synchronizedProcessingTime;
@@ -56,11 +57,8 @@ public class KTimerInternals<K> implements TimerInternals {
   private Instant outputWatermarkTime;
   private K key;
 
-  private KTimerInternals(
-      KeyValueStore<K, Map<String, TimerData>> store,
-      KeyValueStore<String, ValueAndTimestamp<Map<byte[], Instant>>> watermarks) {
+  public KTimerInternals(KeyValueStore<K, Map<String, TimerData>> store) {
     this.store = store;
-    this.watermarks = watermarks;
     this.processingTime = BoundedWindow.TIMESTAMP_MIN_VALUE;
     this.synchronizedProcessingTime = BoundedWindow.TIMESTAMP_MIN_VALUE;
     this.inputWatermarkTime = BoundedWindow.TIMESTAMP_MIN_VALUE;
@@ -118,6 +116,23 @@ public class KTimerInternals<K> implements TimerInternals {
     deleteTimer(timerKey.getNamespace(), timerKey.getTimerId(), timerKey.getDomain());
   }
 
+  public void watermark(Watermark watermark) {
+    Map<String, TimerData> watermarks = store.get(null);
+    if (watermarks == null) {
+      watermarks = new HashMap<>();
+    }
+    watermarks.put(
+        new String(watermark.id().get(), StandardCharsets.UTF_8),
+        TimerData.of(
+            WATERMARK,
+            WATERMARK,
+            StateNamespaces.global(),
+            watermark.watermark(),
+            watermark.watermark(),
+            TimeDomain.EVENT_TIME));
+    store.put(null, watermarks);
+  }
+
   public void advanceProcessingTime(Instant processingTime) {
     this.processingTime = processingTime;
   }
@@ -136,25 +151,24 @@ public class KTimerInternals<K> implements TimerInternals {
     return synchronizedProcessingTime;
   }
 
-  public void advanceInputWatermarkTime(Set<String> streamSource) {
-    Instant watermark = GlobalWindow.TIMESTAMP_MAX_VALUE;
-    for (String source : streamSource) {
-      Map<byte[], Instant> splits = watermarks.get(source).value();
-      if (splits == null) {
-        this.inputWatermarkTime = GlobalWindow.TIMESTAMP_MIN_VALUE;
-        return;
-      } else {
-        // TODO: How can we be sure that all splits have output a watermark?
-        for (Instant split : splits.values()) {
-          if (split.isBefore(watermark)) {
-            watermark = split;
-          }
-        }
+  public void advanceInputWatermarkTime() {
+    Map<String, TimerData> watermarks = store.get(null);
+    if (watermarks == null) {
+      System.out.println("advanceInputWatermarkTime watermarks null");
+      return;
+    }
+    watermarks = Maps.filterEntries(watermarks, e -> e.getValue().getTimerId().equals(WATERMARK));
+    Instant inputWatermarkTime = BoundedWindow.TIMESTAMP_MAX_VALUE;
+    for (TimerData watermark : watermarks.values()) {
+      System.out.println("advanceInputWatermarkTime timerData: " + watermark);
+      if (watermark.getTimestamp().isBefore(inputWatermarkTime)) {
+        inputWatermarkTime = watermark.getTimestamp();
       }
     }
-    if (inputWatermarkTime.isBefore(watermark)) {
-      this.inputWatermarkTime = watermark;
+    if (inputWatermarkTime.isAfter(this.inputWatermarkTime)) {
+      this.inputWatermarkTime = inputWatermarkTime;
     }
+    System.out.println("advanceInputWatermarkTime: " + this.inputWatermarkTime);
   }
 
   @Override
@@ -180,11 +194,15 @@ public class KTimerInternals<K> implements TimerInternals {
         KeyValue<K, Map<String, TimerData>> keyValue = iterator.next();
         List<TimerData> fireableTimers =
             keyValue.value.entrySet().stream()
-                .map(entry -> entry.getValue())
-                .filter(timerData -> domainTime(timerData).isAfter(timerData.getTimestamp()))
+                .map(Map.Entry::getValue)
+                .filter(timerData -> !timerData.getTimerId().equals(KTimerInternals.WATERMARK))
+                .filter(
+                    timerData ->
+                        domainTime(timerData).isAfter(timerData.getTimestamp())
+                            || domainTime(timerData).isEqual(timerData.getTimestamp()))
                 .collect(Collectors.toList());
         if (!fireableTimers.isEmpty()) {
-          fireableTimers.forEach(timerData -> deleteTimer(timerData));
+          fireableTimers.forEach(this::deleteTimer);
           consumer.accept(keyValue.key, fireableTimers);
           hasFired = true;
         }

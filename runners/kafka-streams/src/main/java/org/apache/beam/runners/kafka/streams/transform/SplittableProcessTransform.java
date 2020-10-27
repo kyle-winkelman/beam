@@ -21,7 +21,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import org.apache.beam.runners.core.DoFnRunner;
@@ -31,11 +30,9 @@ import org.apache.beam.runners.core.KeyedWorkItems;
 import org.apache.beam.runners.core.OutputAndTimeBoundedSplittableProcessElementInvoker;
 import org.apache.beam.runners.core.OutputWindowedValue;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems.ProcessFn;
-import org.apache.beam.runners.core.StateNamespace;
-import org.apache.beam.runners.core.StateNamespaces.GlobalNamespace;
-import org.apache.beam.runners.core.StateNamespaces.WindowAndTriggerNamespace;
-import org.apache.beam.runners.core.StateNamespaces.WindowNamespace;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
+import org.apache.beam.runners.kafka.streams.watermark.Watermark;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -49,6 +46,8 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -59,12 +58,9 @@ public class SplittableProcessTransform<
         byte[], KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> {
 
   private final DoFn<InputT, OutputT> internalDoFn;
-  private final String named;
-  private final Consumer<KV<String, KV<byte[], Instant>>> watermarkConsumer;
-
-  private ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT> processFn;
 
   public SplittableProcessTransform(
+      String named,
       PipelineOptions pipelineOptions,
       DoFn<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> doFn,
       Map<PCollectionView<?>, String> sideInputReaderMap,
@@ -77,11 +73,9 @@ public class SplittableProcessTransform<
       Map<String, PCollectionView<?>> sideInputMapping,
       String stateStoreName,
       String timerStoreName,
-      Set<String> streamSource,
-      DoFn<InputT, OutputT> internalDoFn,
-      String named,
-      Consumer<KV<String, KV<byte[], Instant>>> watermarkConsumer) {
+      DoFn<InputT, OutputT> internalDoFn) {
     super(
+        named,
         pipelineOptions,
         doFn,
         sideInputReaderMap,
@@ -93,16 +87,13 @@ public class SplittableProcessTransform<
         doFnSchemaInformation,
         sideInputMapping,
         stateStoreName,
-        timerStoreName,
-        streamSource);
+        timerStoreName);
     this.internalDoFn = internalDoFn;
-    this.named = named;
-    this.watermarkConsumer = watermarkConsumer;
   }
 
   @Override
   public void init(ProcessorContext context) {
-    processFn =
+    ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT> processFn =
         (ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>) doFn;
     processFn.setStateInternalsFactory(key -> stateInternals.withKey(key));
     processFn.setTimerInternalsFactory(key -> timerInternals.withKey(key));
@@ -113,11 +104,11 @@ public class SplittableProcessTransform<
             pipelineOptions,
             new SplittableProcessOutputWindowedValue(),
             sideInputReader,
-            Executors.newSingleThreadScheduledExecutor(Executors.defaultThreadFactory()),
+            Executors.newSingleThreadScheduledExecutor(),
             1000,
-            Duration.millis(1000),
+            Duration.standardSeconds(1),
             () -> bundleFinalizer));
-    processFn.setWatermarkConsumer(watermark -> watermarkConsumer.accept(KV.of(named, watermark)));
+    processFn.setWatermarkConsumer(new SplittableProcessWatermarkConsumer());
     super.init(context);
   }
 
@@ -139,33 +130,37 @@ public class SplittableProcessTransform<
   }
 
   @Override
+  public KeyValue<TupleTag<?>, WatermarkOrWindowedValue<?>> transform(
+      Void object,
+      WatermarkOrWindowedValue<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>>
+          watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.watermark() == null) {
+      watermark(
+          WatermarkOrWindowedValue.of(
+              Watermark.of(
+                  Bytes.wrap(watermarkOrWindowedValue.windowedValue().getValue().key()),
+                  GlobalWindow.TIMESTAMP_MIN_VALUE)));
+    }
+    return super.transform(object, watermarkOrWindowedValue);
+  }
+
+  @Override
   protected void setKey(
       WindowedValue<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>> windowedValue) {
     key = windowedValue.getValue().key();
   }
 
   @Override
-  protected void fireTimers(byte[] key, List<TimerData> timerDatas) {
+  protected void fireTimers(byte[] key, List<TimerData> timers) {
     this.key = key;
-    for (TimerData timerData : timerDatas) {
-      BoundedWindow window;
-      StateNamespace namespace = timerData.getNamespace();
-      if (namespace instanceof GlobalNamespace) {
-        window = GlobalWindow.INSTANCE;
-      } else if (namespace instanceof WindowNamespace) {
-        window = ((WindowNamespace<?>) namespace).getWindow();
-      } else if (namespace instanceof WindowAndTriggerNamespace) {
-        window = ((WindowAndTriggerNamespace<?>) namespace).getWindow();
-      } else {
-        throw new RuntimeException("Invalid namespace: " + namespace);
-      }
+    for (TimerData timerData : timers) {
       Iterables.addAll(
           pushbacks,
           doFnRunner.processElementInReadyWindows(
               WindowedValue.of(
                   KeyedWorkItems.timersWorkItem(key, Collections.singleton(timerData)),
                   timerData.getOutputTimestamp(),
-                  window,
+                  timerDataWindow(timerData),
                   PaneInfo.NO_FIRING)));
     }
   }
@@ -178,7 +173,9 @@ public class SplittableProcessTransform<
         Instant timestamp,
         Collection<? extends BoundedWindow> windows,
         PaneInfo pane) {
-      context.forward(mainOutputTag, WindowedValue.of(output, timestamp, windows, pane));
+      context.forward(
+          mainOutputTag,
+          WatermarkOrWindowedValue.of(WindowedValue.of(output, timestamp, windows, pane)));
     }
 
     @Override
@@ -188,7 +185,20 @@ public class SplittableProcessTransform<
         Instant timestamp,
         Collection<? extends BoundedWindow> windows,
         PaneInfo pane) {
-      context.forward(tag, WindowedValue.of(output, timestamp, windows, pane));
+      context.forward(
+          tag, WatermarkOrWindowedValue.of(WindowedValue.of(output, timestamp, windows, pane)));
+    }
+  }
+
+  private class SplittableProcessWatermarkConsumer implements Consumer<KV<byte[], Instant>> {
+
+    @Override
+    public void accept(KV<byte[], Instant> kv) {
+      Instant watermark = kv.getValue();
+      if (watermark == null) {
+        watermark = timerInternals.currentInputWatermarkTime();
+      }
+      watermark(WatermarkOrWindowedValue.of(Watermark.of(Bytes.wrap(kv.getKey()), watermark)));
     }
   }
 }

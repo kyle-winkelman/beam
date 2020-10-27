@@ -31,6 +31,7 @@ import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StepContext;
 import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.kafka.streams.sideinput.KSideInputReader;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -53,8 +54,12 @@ import org.apache.kafka.streams.processor.Punctuator;
 import org.joda.time.Instant;
 
 public class ParDoTransform<InputT, OutputT>
-    implements Transformer<Void, WindowedValue<InputT>, KeyValue<TupleTag<?>, WindowedValue<?>>> {
+    implements Transformer<
+        Void,
+        WatermarkOrWindowedValue<InputT>,
+        KeyValue<TupleTag<?>, WatermarkOrWindowedValue<?>>> {
 
+  protected final String named;
   protected final PipelineOptions pipelineOptions;
   protected final DoFn<InputT, OutputT> doFn;
   protected final Map<PCollectionView<?>, String> sideInputReaderMap;
@@ -74,6 +79,7 @@ public class ParDoTransform<InputT, OutputT>
   protected List<WindowedValue<InputT>> pushbacks;
 
   public ParDoTransform(
+      String named,
       PipelineOptions pipelineOptions,
       DoFn<InputT, OutputT> doFn,
       Map<PCollectionView<?>, String> sideInputReaderMap,
@@ -84,6 +90,7 @@ public class ParDoTransform<InputT, OutputT>
       WindowingStrategy<?, BoundedWindow> windowingStrategy,
       DoFnSchemaInformation doFnSchemaInformation,
       Map<String, PCollectionView<?>> sideInputMapping) {
+    this.named = named;
     this.pipelineOptions = pipelineOptions;
     this.doFn = SerializableUtils.clone(doFn);
     this.sideInputReaderMap = sideInputReaderMap;
@@ -99,7 +106,7 @@ public class ParDoTransform<InputT, OutputT>
   @Override
   public void init(ProcessorContext context) {
     this.context = context;
-    this.context.schedule(Duration.ofMillis(100), PunctuationType.WALL_CLOCK_TIME, punctuator());
+    this.context.schedule(Duration.ofSeconds(1), PunctuationType.WALL_CLOCK_TIME, punctuator());
     sideInputReader = KSideInputReader.of(this.context, sideInputReaderMap);
     doFnInvoker = DoFnInvokers.invokerFor(doFn);
     doFnRunner =
@@ -136,10 +143,19 @@ public class ParDoTransform<InputT, OutputT>
   }
 
   @Override
-  public KeyValue<TupleTag<?>, WindowedValue<?>> transform(
-      Void object, WindowedValue<InputT> windowedValue) {
-    tryOrTeardown(
-        () -> Iterables.addAll(pushbacks, doFnRunner.processElementInReadyWindows(windowedValue)));
+  public KeyValue<TupleTag<?>, WatermarkOrWindowedValue<?>> transform(
+      Void object, WatermarkOrWindowedValue<InputT> watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.windowedValue() == null) {
+      watermark(watermarkOrWindowedValue);
+    } else {
+      System.out.println(named + ": " + watermarkOrWindowedValue);
+      tryOrTeardown(
+          () ->
+              Iterables.addAll(
+                  pushbacks,
+                  doFnRunner.processElementInReadyWindows(
+                      watermarkOrWindowedValue.windowedValue())));
+    }
     return null;
   }
 
@@ -148,6 +164,13 @@ public class ParDoTransform<InputT, OutputT>
     tryOrTeardown(doFnRunner::finishBundle);
     finalizeBundles();
     doFnInvoker.invokeTeardown();
+  }
+
+  protected void watermark(WatermarkOrWindowedValue watermarkOrWindowedValue) {
+    context.forward(mainOutputTag, watermarkOrWindowedValue);
+    for (TupleTag<?> additionalOutputTag : additionalOutputTags) {
+      context.forward(additionalOutputTag, watermarkOrWindowedValue);
+    }
   }
 
   private void finalizeBundles() {
@@ -184,7 +207,7 @@ public class ParDoTransform<InputT, OutputT>
 
     @Override
     public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
-      context.forward(tag, output);
+      context.forward(tag, WatermarkOrWindowedValue.of(output));
     }
   }
 
@@ -195,6 +218,11 @@ public class ParDoTransform<InputT, OutputT>
       tryOrTeardown(doFnRunner::finishBundle);
       finalizeBundles();
       tryOrTeardown(doFnRunner::startBundle);
+      List<WindowedValue<InputT>> currentPushbacks = pushbacks;
+      pushbacks = new ArrayList<>();
+      for (WindowedValue<InputT> pushback : currentPushbacks) {
+        transform(null, WatermarkOrWindowedValue.of(pushback));
+      }
     }
   }
 

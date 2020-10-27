@@ -17,30 +17,41 @@
  */
 package org.apache.beam.runners.kafka.streams.transform;
 
-import java.util.Collections;
-import java.util.stream.Collectors;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.kstream.KeyValueMapper;
+import org.apache.kafka.streams.kstream.Transformer;
+import org.apache.kafka.streams.processor.ProcessorContext;
+import org.joda.time.Instant;
 
-public class CreateViewTransform<T>
-    implements KeyValueMapper<
-        Void, WatermarkOrWindowedValue<T>, Iterable<KeyValue<BoundedWindow, T>>> {
+public class FlattenTransform<T>
+    implements Transformer<
+        Void, WatermarkOrWindowedValue<T>, KeyValue<Void, WatermarkOrWindowedValue<T>>> {
 
-  public CreateViewTransform() {}
+  private Map<Bytes, Instant> duplicates;
 
   @Override
-  public Iterable<KeyValue<BoundedWindow, T>> apply(
+  public void init(ProcessorContext context) {
+    duplicates = new HashMap<>();
+  }
+
+  @Override
+  public KeyValue<Void, WatermarkOrWindowedValue<T>> transform(
       Void key, WatermarkOrWindowedValue<T> watermarkOrWindowedValue) {
     if (watermarkOrWindowedValue.windowedValue() == null) {
-      return Collections.emptyList();
+      Instant watermark =
+          duplicates.put(
+              watermarkOrWindowedValue.watermark().id(),
+              watermarkOrWindowedValue.watermark().watermark());
+      if (watermarkOrWindowedValue.watermark().watermark().isEqual(watermark)) {
+        return null;
+      }
     }
-    return watermarkOrWindowedValue.windowedValue().getWindows().stream()
-        .map(
-            window ->
-                KeyValue.pair(
-                    (BoundedWindow) window, watermarkOrWindowedValue.windowedValue().getValue()))
-        .collect(Collectors.toList());
+    return KeyValue.pair(null, watermarkOrWindowedValue);
   }
+
+  @Override
+  public void close() {}
 }

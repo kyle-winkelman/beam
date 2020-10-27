@@ -77,12 +77,12 @@ public class SplittableParDoViaKeyedWorkItems {
    * <p>Unlike a real {@link GroupByKey}, ignores the input's windowing and triggering strategy and
    * emits output immediately.
    */
-  public static class GBKIntoKeyedWorkItems<KeyT, InputT>
+  public static class GBKIntoKeyedWorkItems<InputT>
       extends RawPTransform<
-          PCollection<KV<KeyT, InputT>>, PCollection<KeyedWorkItem<KeyT, InputT>>> {
+          PCollection<KV<byte[], InputT>>, PCollection<KeyedWorkItem<byte[], InputT>>> {
     @Override
-    public PCollection<KeyedWorkItem<KeyT, InputT>> expand(PCollection<KV<KeyT, InputT>> input) {
-      KvCoder<KeyT, InputT> kvCoder = (KvCoder<KeyT, InputT>) input.getCoder();
+    public PCollection<KeyedWorkItem<byte[], InputT>> expand(PCollection<KV<byte[], InputT>> input) {
+      KvCoder<byte[], InputT> kvCoder = (KvCoder<byte[], InputT>) input.getCoder();
       return PCollection.createPrimitiveOutputInternal(
           input.getPipeline(),
           WindowingStrategy.globalDefault(),

@@ -89,6 +89,7 @@ public class SplittableDoFnTest implements Serializable {
     @ProcessElement
     public ProcessContinuation process(
         ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      System.out.println(tracker.currentRestriction());
       for (long i = tracker.currentRestriction().getFrom(), numIterations = 0;
           tracker.tryClaim(i);
           ++i, ++numIterations) {

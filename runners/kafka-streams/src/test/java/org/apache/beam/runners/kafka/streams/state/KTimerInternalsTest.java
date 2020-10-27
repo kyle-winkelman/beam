@@ -17,12 +17,12 @@
  */
 package org.apache.beam.runners.kafka.streams.state;
 
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import org.apache.beam.runners.core.StateNamespaces;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
+import org.apache.beam.runners.kafka.streams.coder.BytesCoder;
+import org.apache.beam.runners.kafka.streams.watermark.Watermark;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.kafka.streams.processor.StateStore;
 import org.joda.time.Instant;
@@ -42,17 +42,14 @@ public class KTimerInternalsTest {
   private static final String ID_FOUR = "ID_FOUR";
   private static final Instant INSTANT = Instant.now();
 
-  private MockKeyValueStore<String, List<TimerData>> store;
-  private MockKeyValueStore<String, Map<String, Instant>> watermarks;
+  private MockKeyValueStore<String, Map<String, TimerData>> store;
   private KTimerInternals<String> timerInternals;
 
   @Before
   public void setUp() {
     store = new MockKeyValueStore<>();
-    watermarks = new MockKeyValueStore<>();
     Map<String, StateStore> stores = new HashMap<>();
     stores.put(NAME, store);
-    stores.put("watermark", watermarks);
     timerInternals =
         KTimerInternals.<String>of(NAME, new MockProcessorContext(stores)).withKey(KEY);
   }
@@ -78,10 +75,11 @@ public class KTimerInternalsTest {
         future,
         future,
         TimeDomain.SYNCHRONIZED_PROCESSING_TIME);
-    timerInternals.advanceInputWatermarkTime(Collections.emptySet());
-    timerInternals.advanceOutputWatermarkTime(future);
-    timerInternals.advanceProcessingTime(future);
-    timerInternals.advanceSynchronizedProcessingTime(future);
+    timerInternals.watermark(Watermark.of(BytesCoder.EMPTY, INSTANT));
+    timerInternals.advanceInputWatermarkTime();
+    timerInternals.advanceOutputWatermarkTime(INSTANT);
+    timerInternals.advanceProcessingTime(INSTANT);
+    timerInternals.advanceSynchronizedProcessingTime(INSTANT);
     timerInternals.fireTimers(
         (key, timers) -> {
           Assert.assertEquals(KEY, key);
@@ -107,7 +105,8 @@ public class KTimerInternalsTest {
           }
         });
 
-    Assert.assertEquals(1, store.map.size());
+    Assert.assertEquals(1, store.map.get(KEY).size());
+    Assert.assertEquals(1, store.map.get(null).size());
   }
 
   @Test

@@ -34,9 +34,6 @@ import org.apache.beam.runners.kafka.streams.translation.TranslationContext;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
-import org.apache.beam.sdk.coders.InstantCoder;
-import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsValidator;
@@ -44,7 +41,6 @@ import org.apache.beam.sdk.runners.PTransformOverride;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
 import org.apache.kafka.clients.admin.Admin;
@@ -57,7 +53,6 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.processor.internals.BeamTopicConfig;
 import org.apache.kafka.streams.processor.internals.InternalTopicConfig;
 import org.apache.kafka.streams.processor.internals.InternalTopicManager;
-import org.joda.time.Instant;
 
 public class KafkaStreamsRunner extends PipelineRunner<KafkaStreamsPipelineResult> {
 
@@ -108,34 +103,11 @@ public class KafkaStreamsRunner extends PipelineRunner<KafkaStreamsPipelineResul
             .put(
                 context.getImpulseTopic(),
                 new BeamTopicConfig(context.getImpulseTopic(), Collections.emptyMap()))
-            .put(
-                context.getWatermarkTopic(),
-                new BeamTopicConfig(context.getWatermarkTopic(), Collections.emptyMap()))
             .build();
     InternalTopicManager internalTopicManager =
         new InternalTopicManager(
             Admin.create(properties), new StreamsConfig(pipelineOptions.getProperties()));
     Set<String> newlyCreatedTopics = internalTopicManager.makeReady(topics);
-
-    Producer<String, KV<byte[], Instant>> watermarkProducer =
-        new KafkaProducer<String, KV<byte[], Instant>>(
-            properties,
-            CoderSerde.of(StringUtf8Coder.of()).serializer(),
-            CoderSerde.of(KvCoder.of(ByteArrayCoder.of(), InstantCoder.of())).serializer());
-    context
-        .getWatermarkConsumer()
-        .setConsumer(
-            kv -> {
-              try {
-                watermarkProducer
-                    .send(
-                        new ProducerRecord<>(
-                            context.getWatermarkTopic(), kv.getKey(), kv.getValue()))
-                    .get();
-              } catch (InterruptedException | ExecutionException e) {
-                throw new RuntimeException(e);
-              }
-            });
 
     if (newlyCreatedTopics.contains(context.getImpulseTopic())) {
       try (Producer<Void, WindowedValue<byte[]>> impulseProducer =

@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.construction.ParDoTranslation;
 import org.apache.beam.runners.core.construction.TransformInputs;
+import org.apache.beam.runners.kafka.streams.coder.WatermarkOrWindowedValueCoder;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.runners.AppliedPTransform;
@@ -50,7 +52,9 @@ public abstract class TransformTranslator<
   private static final int MAX_NAME_LENGTH = 210;
 
   abstract void translate(
-      AppliedPTransform<InputT, OutputT, TransformT> appliedPTransform, TranslationContext context);
+      AppliedPTransform<InputT, OutputT, TransformT> appliedPTransform,
+      AppliedPTransform<?, ?, ?> enclosingAppliedPTransform,
+      TranslationContext context);
 
   protected InputT mainInput(AppliedPTransform<InputT, OutputT, TransformT> appliedPTransform) {
     return (InputT) Iterables.getOnlyElement(mainInputs(appliedPTransform));
@@ -104,12 +108,15 @@ public abstract class TransformTranslator<
     }
   }
 
-  protected <T> Coder<WindowedValue<T>> coder(PCollection<?> pCollection, Coder<T> coder) {
+  protected <T> Coder<WatermarkOrWindowedValue<T>> coder(
+      PCollection<?> pCollection, Coder<T> coder) {
     if (pCollection.getWindowingStrategy() == null) {
-      return WindowedValue.getFullCoder(coder, GlobalWindow.Coder.INSTANCE);
+      return WatermarkOrWindowedValueCoder.of(
+          WindowedValue.getFullCoder(coder, GlobalWindow.Coder.INSTANCE));
     } else {
-      return WindowedValue.getFullCoder(
-          coder, pCollection.getWindowingStrategy().getWindowFn().windowCoder());
+      return WatermarkOrWindowedValueCoder.of(
+          WindowedValue.getFullCoder(
+              coder, pCollection.getWindowingStrategy().getWindowFn().windowCoder()));
     }
   }
 
@@ -160,7 +167,7 @@ public abstract class TransformTranslator<
     }
   }
 
-  protected String named(AppliedPTransform<InputT, OutputT, TransformT> appliedPTransform) {
+  protected String named(AppliedPTransform<?, ?, ?> appliedPTransform) {
     String named =
         appliedPTransform
             .getFullName()

@@ -20,23 +20,31 @@ package org.apache.beam.runners.kafka.streams.transform;
 import java.util.Collections;
 import org.apache.beam.runners.core.KeyedWorkItem;
 import org.apache.beam.runners.core.KeyedWorkItems;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.KeyValueMapper;
 
 public class SplittableGBKIKWITransform<K, V>
     implements KeyValueMapper<
-        K, WindowedValue<V>, KeyValue<Void, WindowedValue<KeyedWorkItem<K, V>>>> {
+        K,
+        WatermarkOrWindowedValue<V>,
+        KeyValue<Void, WatermarkOrWindowedValue<KeyedWorkItem<K, V>>>> {
 
   @Override
-  public KeyValue<Void, WindowedValue<KeyedWorkItem<K, V>>> apply(
-      K key, WindowedValue<V> windowedValue) {
+  public KeyValue<Void, WatermarkOrWindowedValue<KeyedWorkItem<K, V>>> apply(
+      K key, WatermarkOrWindowedValue<V> watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.windowedValue() == null) {
+      return KeyValue.pair(null, watermarkOrWindowedValue.toNewType());
+    }
     return KeyValue.pair(
         null,
-        WindowedValue.of(
-            KeyedWorkItems.elementsWorkItem(key, Collections.singleton(windowedValue)),
-            windowedValue.getTimestamp(),
-            windowedValue.getWindows(),
-            windowedValue.getPane()));
+        WatermarkOrWindowedValue.of(
+            WindowedValue.of(
+                KeyedWorkItems.elementsWorkItem(
+                    key, Collections.singleton(watermarkOrWindowedValue.windowedValue())),
+                watermarkOrWindowedValue.windowedValue().getTimestamp(),
+                watermarkOrWindowedValue.windowedValue().getWindows(),
+                watermarkOrWindowedValue.windowedValue().getPane())));
   }
 }

@@ -17,10 +17,8 @@
  */
 package org.apache.beam.runners.kafka.streams.transform;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
 import org.apache.beam.runners.core.StateInternals;
@@ -35,6 +33,7 @@ import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
 import org.apache.beam.runners.kafka.streams.state.KStateInternals;
 import org.apache.beam.runners.kafka.streams.state.KTimerInternals;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -56,13 +55,13 @@ public class StatefulParDoTransform<K, InputT, OutputT> extends ParDoTransform<I
 
   private final String stateStoreName;
   private final String timerStoreName;
-  private final Set<String> streamSource;
 
   protected KStateInternals<K> stateInternals;
   protected KTimerInternals<K> timerInternals;
   protected K key;
 
   public StatefulParDoTransform(
+      String named,
       PipelineOptions pipelineOptions,
       DoFn<InputT, OutputT> doFn,
       Map<PCollectionView<?>, String> sideInputReaderMap,
@@ -74,9 +73,9 @@ public class StatefulParDoTransform<K, InputT, OutputT> extends ParDoTransform<I
       DoFnSchemaInformation doFnSchemaInformation,
       Map<String, PCollectionView<?>> sideInputMapping,
       String stateStoreName,
-      String timerStoreName,
-      Set<String> streamSource) {
+      String timerStoreName) {
     super(
+        named,
         pipelineOptions,
         doFn,
         sideInputReaderMap,
@@ -89,7 +88,6 @@ public class StatefulParDoTransform<K, InputT, OutputT> extends ParDoTransform<I
         sideInputMapping);
     this.stateStoreName = stateStoreName;
     this.timerStoreName = timerStoreName;
-    this.streamSource = streamSource;
   }
 
   @Override
@@ -124,39 +122,44 @@ public class StatefulParDoTransform<K, InputT, OutputT> extends ParDoTransform<I
   }
 
   @Override
-  public KeyValue<TupleTag<?>, WindowedValue<?>> transform(
-      Void object, WindowedValue<InputT> windowedValue) {
-    setKey(windowedValue);
-    return super.transform(object, windowedValue);
+  public KeyValue<TupleTag<?>, WatermarkOrWindowedValue<?>> transform(
+      Void object, WatermarkOrWindowedValue<InputT> watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.windowedValue() == null) {
+      timerInternals.watermark(watermarkOrWindowedValue.watermark());
+    } else {
+      setKey(watermarkOrWindowedValue.windowedValue());
+    }
+    return super.transform(object, watermarkOrWindowedValue);
   }
 
   protected void setKey(WindowedValue<InputT> windowedValue) {
     key = ((KV<K, ?>) windowedValue.getValue()).getKey();
   }
 
-  protected void fireTimers(K key, List<TimerData> timerDatas) {
+  protected void fireTimers(K key, List<TimerData> timers) {
     this.key = key;
-    for (TimerData timerData : timerDatas) {
-      BoundedWindow window;
-      StateNamespace namespace = timerData.getNamespace();
-      if (namespace instanceof GlobalNamespace) {
-        window = GlobalWindow.INSTANCE;
-      } else if (namespace instanceof WindowNamespace) {
-        window = ((WindowNamespace<?>) namespace).getWindow();
-      } else if (namespace instanceof WindowAndTriggerNamespace) {
-        window = ((WindowAndTriggerNamespace<?>) namespace).getWindow();
-      } else {
-        throw new RuntimeException("Invalid namespace: " + namespace);
-      }
-
+    for (TimerData timer : timers) {
       doFnRunner.onTimer(
-          timerData.getTimerId(),
-          timerData.getTimerFamilyId(),
+          timer.getTimerId(),
+          timer.getTimerFamilyId(),
           key,
-          window,
-          timerData.getTimestamp(),
-          timerData.getOutputTimestamp(),
-          timerData.getDomain());
+          timerDataWindow(timer),
+          timer.getTimestamp(),
+          timer.getOutputTimestamp(),
+          timer.getDomain());
+    }
+  }
+
+  protected BoundedWindow timerDataWindow(TimerData timerData) {
+    StateNamespace namespace = timerData.getNamespace();
+    if (namespace instanceof GlobalNamespace) {
+      return GlobalWindow.INSTANCE;
+    } else if (namespace instanceof WindowNamespace) {
+      return ((WindowNamespace<?>) namespace).getWindow();
+    } else if (namespace instanceof WindowAndTriggerNamespace) {
+      return ((WindowAndTriggerNamespace<?>) namespace).getWindow();
+    } else {
+      throw new RuntimeException("Invalid namespace: " + namespace);
     }
   }
 
@@ -164,19 +167,14 @@ public class StatefulParDoTransform<K, InputT, OutputT> extends ParDoTransform<I
 
     @Override
     public void punctuate(long timestamp) {
-      super.punctuate(timestamp);
       Instant previousInputWatermarkTime = timerInternals.currentInputWatermarkTime();
       Instant previousProcessingTime = timerInternals.currentProcessingTime();
-      timerInternals.advanceInputWatermarkTime(streamSource);
+      timerInternals.advanceInputWatermarkTime();
       timerInternals.advanceOutputWatermarkTime(previousInputWatermarkTime);
       timerInternals.advanceProcessingTime(new Instant(timestamp));
       timerInternals.advanceSynchronizedProcessingTime(previousProcessingTime);
+      super.punctuate(timestamp);
       timerInternals.fireTimers(StatefulParDoTransform.this::fireTimers);
-      List<WindowedValue<InputT>> currentPushbacks = pushbacks;
-      pushbacks = new ArrayList<>();
-      for (WindowedValue<InputT> pushback : currentPushbacks) {
-        transform(null, pushback);
-      }
     }
   }
 

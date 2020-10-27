@@ -24,8 +24,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.beam.runners.core.ReadyCheckingSideInputReader;
-import org.apache.beam.runners.core.StateNamespaces;
-import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.transforms.Materializations;
 import org.apache.beam.sdk.transforms.Materializations.IterableView;
 import org.apache.beam.sdk.transforms.Materializations.MultimapView;
@@ -60,22 +58,22 @@ public class KSideInputReader implements ReadyCheckingSideInputReader {
 
   @Override
   public <T> T get(PCollectionView<T> view, BoundedWindow window) {
-    String namespace = namespace(view, window);
     switch (view.getViewFn().getMaterialization().getUrn()) {
       case Materializations.ITERABLE_MATERIALIZATION_URN:
         return ((ViewFn<IterableView<Object>, T>) view.getViewFn())
             .apply(
                 new IterableMaterializationView<>(
-                    ((ReadOnlyKeyValueStore<String, ValueAndTimestamp<List<Object>>>)
+                    ((ReadOnlyKeyValueStore<BoundedWindow, ValueAndTimestamp<List<Object>>>)
                             processorContext.getStateStore(sideInputs.get(view)))
-                        .get(namespace)));
+                        .get(window)));
       case Materializations.MULTIMAP_MATERIALIZATION_URN:
         return ((ViewFn<MultimapView<Object, Object>, T>) view.getViewFn())
             .apply(
                 new MultimapMaterializationView<>(
-                    ((ReadOnlyKeyValueStore<String, ValueAndTimestamp<List<KV<Object, Object>>>>)
+                    ((ReadOnlyKeyValueStore<
+                                BoundedWindow, ValueAndTimestamp<List<KV<Object, Object>>>>)
                             processorContext.getStateStore(sideInputs.get(view)))
-                        .get(namespace)));
+                        .get(window)));
       default:
         throw new IllegalArgumentException(
             "Unknown materialization: " + view.getViewFn().getMaterialization().getUrn());
@@ -89,18 +87,10 @@ public class KSideInputReader implements ReadyCheckingSideInputReader {
 
   @Override
   public boolean isReady(PCollectionView<?> view, BoundedWindow window) {
-    String namespace = namespace(view, window);
-    return ((ReadOnlyKeyValueStore<String, ValueAndTimestamp<List<Object>>>)
+    return ((ReadOnlyKeyValueStore<BoundedWindow, ValueAndTimestamp<List<Object>>>)
                 processorContext.getStateStore(sideInputs.get(view)))
-            .get(namespace)
+            .get(window)
         != null;
-  }
-
-  private String namespace(PCollectionView<?> view, BoundedWindow window) {
-    return StateNamespaces.window(
-            (Coder<BoundedWindow>) view.getWindowingStrategyInternal().getWindowFn().windowCoder(),
-            view.getWindowMappingFn().getSideInputWindow(window))
-        .stringKey();
   }
 
   private static class IterableMaterializationView<V> implements IterableView<V> {

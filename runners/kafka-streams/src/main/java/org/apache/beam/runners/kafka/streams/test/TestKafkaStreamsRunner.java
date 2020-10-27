@@ -17,42 +17,45 @@
  */
 package org.apache.beam.runners.kafka.streams.test;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems;
+import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.core.construction.EmptyFlattenAsCreateFactory;
 import org.apache.beam.runners.core.construction.PTransformMatchers;
 import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.core.construction.TestStreamAsSplittableDoFnFactory;
 import org.apache.beam.runners.kafka.streams.KafkaStreamsPipelineOptions;
+import org.apache.beam.runners.kafka.streams.coder.BytesCoder;
 import org.apache.beam.runners.kafka.streams.coder.CoderSerde;
+import org.apache.beam.runners.kafka.streams.coder.WatermarkOrWindowedValueCoder;
 import org.apache.beam.runners.kafka.streams.override.KafkaStreamsCreateViewPTransformOverrideFactory;
+import org.apache.beam.runners.kafka.streams.state.KTimerInternals;
 import org.apache.beam.runners.kafka.streams.translation.PipelineTranslator;
 import org.apache.beam.runners.kafka.streams.translation.TranslationContext;
+import org.apache.beam.runners.kafka.streams.watermark.Watermark;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
-import org.apache.beam.sdk.coders.InstantCoder;
-import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.PTransformOverride;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.TopologyTestDriver;
-import org.apache.kafka.streams.state.KeyValueIterator;
-import org.apache.kafka.streams.state.ValueAndTimestamp;
-import org.joda.time.Instant;
+import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.state.KeyValueStore;
 
 public class TestKafkaStreamsRunner extends PipelineRunner<TestKafkaStreamsPipelineResult> {
 
@@ -108,44 +111,55 @@ public class TestKafkaStreamsRunner extends PipelineRunner<TestKafkaStreamsPipel
     config.putAll(pipelineOptions.getProperties());
     TopologyTestDriver topologyTestDriver = new TopologyTestDriver(topology, config);
 
-    TestInputTopic<String, KV<byte[], Instant>> watermarkTopic =
-        topologyTestDriver.createInputTopic(
-            context.getWatermarkTopic(),
-            CoderSerde.of(StringUtf8Coder.of()).serializer(),
-            CoderSerde.of(KvCoder.of(ByteArrayCoder.of(), InstantCoder.of())).serializer());
-    context
-        .getWatermarkConsumer()
-        .setConsumer(kv -> watermarkTopic.pipeInput(kv.getKey(), kv.getValue()));
-
-    TestInputTopic<Void, WindowedValue<byte[]>> impulseTopic =
+    TestInputTopic<Void, WatermarkOrWindowedValue<byte[]>> impulseTopic =
         topologyTestDriver.createInputTopic(
             context.getImpulseTopic(),
             CoderSerde.of(VoidCoder.of()).serializer(),
             CoderSerde.of(
-                    WindowedValue.getFullCoder(ByteArrayCoder.of(), GlobalWindow.Coder.INSTANCE))
+                    WatermarkOrWindowedValueCoder.of(
+                        WindowedValue.getFullCoder(
+                            ByteArrayCoder.of(), GlobalWindow.Coder.INSTANCE)))
                 .serializer());
-    impulseTopic.pipeInput(WindowedValue.valueInGlobalWindow(new byte[0]));
+    try {
+      impulseTopic.pipeInput(
+          WatermarkOrWindowedValue.of(
+              Watermark.of(BytesCoder.EMPTY, GlobalWindow.TIMESTAMP_MIN_VALUE)));
+      impulseTopic.pipeInput(
+          WatermarkOrWindowedValue.of(WindowedValue.valueInGlobalWindow(new byte[0])));
+      impulseTopic.pipeInput(
+          WatermarkOrWindowedValue.of(
+              Watermark.of(BytesCoder.EMPTY, GlobalWindow.TIMESTAMP_MAX_VALUE)));
 
-    int count = 0;
-    while (notGlobalWatermarkMax(topologyTestDriver) && count++ < 5) {
-      Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
+      while (notFinished(topologyTestDriver)) {
+        topologyTestDriver.advanceWallClockTime(Duration.ofSeconds(1));
+      }
+      topologyTestDriver.advanceWallClockTime(Duration.ofSeconds(1));
+    } catch (StreamsException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof RuntimeException) {
+        cause = cause.getCause();
+        if (cause instanceof UserCodeException) {
+          cause = cause.getCause();
+        }
+      }
+      throw new RuntimeException(cause == null ? "" : cause.getMessage(), e);
     }
     topologyTestDriver.close();
     return null;
   }
 
-  private boolean notGlobalWatermarkMax(TopologyTestDriver topologyTestDriver) {
-    KeyValueIterator<String, ValueAndTimestamp<Map<byte[], Instant>>> watermarks =
-        topologyTestDriver
-            .<String, Map<byte[], Instant>>getTimestampedKeyValueStore("watermark")
-            .all();
-    while (watermarks.hasNext()) {
-      for (Instant watermark : watermarks.next().value.value().values()) {
-        if (watermark.isBefore(GlobalWindow.TIMESTAMP_MAX_VALUE)) {
-          return false;
+  private boolean notFinished(TopologyTestDriver topologyTestDriver) {
+    for (Entry<String, StateStore> entry : topologyTestDriver.getAllStateStores().entrySet()) {
+      if (entry.getKey().endsWith("_Timer")) {
+        KeyValueStore<Object, Map<String, TimerInternals.TimerData>> store =
+            (KeyValueStore<Object, Map<String, TimerInternals.TimerData>>) entry.getValue();
+        KTimerInternals<Object> timerInternals = new KTimerInternals<>(store);
+        timerInternals.advanceInputWatermarkTime();
+        if (timerInternals.currentInputWatermarkTime().isBefore(GlobalWindow.TIMESTAMP_MAX_VALUE)) {
+          return true;
         }
       }
     }
-    return true;
+    return false;
   }
 }

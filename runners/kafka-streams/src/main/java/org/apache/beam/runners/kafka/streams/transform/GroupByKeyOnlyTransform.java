@@ -17,18 +17,37 @@
  */
 package org.apache.beam.runners.kafka.streams.transform;
 
-import org.apache.beam.sdk.util.WindowedValue;
+import java.util.Collections;
+import org.apache.beam.runners.kafka.streams.watermark.WatermarkOrWindowedValue;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.KeyValueMapper;
 
 public class GroupByKeyOnlyTransform<K, V>
-    implements KeyValueMapper<Void, WindowedValue<KV<K, V>>, KeyValue<K, WindowedValue<V>>> {
+    implements KeyValueMapper<
+        Void,
+        WatermarkOrWindowedValue<KV<K, V>>,
+        Iterable<KeyValue<K, WatermarkOrWindowedValue<V>>>> {
 
   @Override
-  public KeyValue<K, WindowedValue<V>> apply(Void key, WindowedValue<KV<K, V>> windowedValue) {
-    return KeyValue.pair(
-        windowedValue.getValue().getKey(),
-        windowedValue.withValue(windowedValue.getValue().getValue()));
+  public Iterable<KeyValue<K, WatermarkOrWindowedValue<V>>> apply(
+      Void key, WatermarkOrWindowedValue<KV<K, V>> watermarkOrWindowedValue) {
+    if (watermarkOrWindowedValue.windowedValue() == null) {
+      ImmutableList.Builder<KeyValue<K, WatermarkOrWindowedValue<V>>> builder =
+          ImmutableList.builder();
+      // TODO: For loop on number of partitions.
+      for (int i = 0; i < 1; i++) {
+        builder.add(KeyValue.pair(null, watermarkOrWindowedValue.toNewType()));
+      }
+      return builder.build();
+    }
+    return Collections.singleton(
+        KeyValue.pair(
+            watermarkOrWindowedValue.windowedValue().getValue().getKey(),
+            WatermarkOrWindowedValue.of(
+                watermarkOrWindowedValue
+                    .windowedValue()
+                    .withValue(watermarkOrWindowedValue.windowedValue().getValue().getValue()))));
   }
 }
